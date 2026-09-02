@@ -42,6 +42,19 @@ describe('isNonRetryableRequestError', () => {
     ).toBe(true);
   });
 
+  it('returns true for provider request-body-too-large context errors', () => {
+    expect(
+      isNonRetryableRequestError({
+        error: {
+          message: 'Request body too large for gpt-4o model',
+          type: 'invalid_request_error',
+        },
+        errorType: AgentRuntimeErrorType.ProviderBizError,
+        status: 400,
+      }),
+    ).toBe(true);
+  });
+
   it('returns true for provider content_filter moderation errors', () => {
     // ROOT CAUSE:
     //
@@ -143,6 +156,20 @@ describe('isNonRetryableRequestError', () => {
         error: { code: 'insufficient_quota', message: 'You exceeded your current quota' },
         errorType: AgentRuntimeErrorType.ProviderBizError,
         status: 429,
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false for standardized provider account balance errors', () => {
+    expect(
+      isNonRetryableRequestError({
+        error: {
+          code: 'invalid_request_error',
+          message: 'Insufficient Balance',
+          type: 'unknown_error',
+        },
+        errorType: AgentRuntimeErrorType.InsufficientQuota,
+        status: 402,
       }),
     ).toBe(false);
   });

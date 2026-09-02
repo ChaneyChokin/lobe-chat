@@ -2,6 +2,8 @@
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { matchesAgentInterventionContinuationProvenance } from '@/business/server/agent-run/agentInterventionIdentity';
+
 import { getTestDB } from '../../core/getTestDB';
 import { agentOperations, users } from '../../schemas';
 import type { LobeChatDatabase } from '../../type';
@@ -93,6 +95,95 @@ describe('AgentOperationModel', () => {
         .from(agentOperations)
         .where(eq(agentOperations.id, operationId));
       expect(rows).toHaveLength(1);
+    });
+  });
+
+  describe('agent intervention dispatch recovery markers', () => {
+    it('persists ready preparation and queue ACK without replacing provenance', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const operationId = 'op-intervention-marker';
+      const provenance = {
+        resolutionRequestId: 'request-intervention-marker',
+        sourceOperationId: 'source-operation',
+        sourceToolMessageIds: ['tool-message'],
+      };
+      await model.recordStart({
+        metadata: { agentInterventionContinuation: provenance },
+        operationId,
+      });
+
+      await expect(
+        model.recordAgentInterventionPreparation(operationId, {
+          deduplicationId: 'agent-intervention:op-intervention-marker:0',
+          resolutionRequestId: provenance.resolutionRequestId,
+          state: 'ready',
+          stepIndex: 0,
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        model.recordAgentInterventionDispatch(operationId, {
+          deduplicationId: 'agent-intervention:op-intervention-marker:0',
+          messageId: 'queue-message',
+          resolutionRequestId: provenance.resolutionRequestId,
+          scheduledAt: '2026-08-26T00:00:00.000Z',
+          state: 'scheduled',
+        }),
+      ).resolves.toBe(true);
+
+      const row = await model.findById(operationId);
+      expect(
+        matchesAgentInterventionContinuationProvenance(
+          row?.metadata?.agentInterventionContinuation,
+          provenance,
+        ),
+      ).toBe(true);
+      expect(row?.metadata).toMatchObject({
+        agentInterventionContinuation: provenance,
+        agentInterventionDispatch: {
+          deduplicationId: 'agent-intervention:op-intervention-marker:0',
+          state: 'scheduled',
+        },
+        agentInterventionPreparation: {
+          deduplicationId: 'agent-intervention:op-intervention-marker:0',
+          state: 'ready',
+          stepIndex: 0,
+        },
+      });
+    });
+
+    it('rejects a preparation marker from another request or owner', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const attacker = new AgentOperationModel(serverDB, otherUserId);
+      const operationId = 'op-intervention-marker-authority';
+      await model.recordStart({
+        metadata: {
+          agentInterventionContinuation: {
+            resolutionRequestId: 'request-owner',
+            sourceOperationId: 'source-operation',
+            sourceToolMessageIds: ['tool-message'],
+          },
+        },
+        operationId,
+      });
+      const marker = {
+        deduplicationId: 'agent-intervention:op-intervention-marker-authority:0',
+        resolutionRequestId: 'request-other',
+        state: 'ready' as const,
+        stepIndex: 0,
+      };
+
+      await expect(model.recordAgentInterventionPreparation(operationId, marker)).resolves.toBe(
+        false,
+      );
+      await expect(
+        attacker.recordAgentInterventionPreparation(operationId, {
+          ...marker,
+          resolutionRequestId: 'request-owner',
+        }),
+      ).resolves.toBe(false);
+      expect((await model.findById(operationId))?.metadata).not.toHaveProperty(
+        'agentInterventionPreparation',
+      );
     });
   });
 
@@ -210,6 +301,183 @@ describe('AgentOperationModel', () => {
     });
   });
 
+  describe('operation lease', () => {
+    it('refreshes a running operation and only settles an expired lease', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const operationId = 'op-lease';
+      await model.recordStart({ operationId });
+      await serverDB
+        .update(agentOperations)
+        .set({ updatedAt: new Date('2026-01-01T00:00:00.000Z') })
+        .where(eq(agentOperations.id, operationId));
+
+      await model.touchRunning(operationId);
+      const refreshed = await model.findById(operationId);
+      expect(refreshed!.updatedAt.getTime()).toBeGreaterThan(
+        new Date('2026-01-01T00:00:00.000Z').getTime(),
+      );
+
+      expect(await model.settleStaleRunning(operationId, new Date(Date.now() - 60_000))).toBe(
+        false,
+      );
+      expect((await model.findById(operationId))?.status).toBe('running');
+
+      await serverDB
+        .update(agentOperations)
+        .set({ updatedAt: new Date('2026-01-01T00:00:00.000Z') })
+        .where(eq(agentOperations.id, operationId));
+      expect(await model.settleStaleRunning(operationId, new Date(Date.now() - 60_000))).toBe(true);
+      expect(await model.findById(operationId)).toMatchObject({
+        completionReason: 'lease_expired',
+        status: 'abandoned',
+      });
+    });
+
+    it('persists the latest cost while reclaiming an expired lease', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const operationId = 'op-lease-cost';
+      await model.recordStart({ operationId });
+      await serverDB
+        .update(agentOperations)
+        .set({ updatedAt: new Date('2026-01-01T00:00:00.000Z') })
+        .where(eq(agentOperations.id, operationId));
+
+      expect(await model.settleStaleRunning(operationId, new Date(Date.now() - 60_000), 0.75)).toBe(
+        true,
+      );
+      expect(await model.findById(operationId)).toMatchObject({
+        status: 'abandoned',
+        totalCost: 0.75,
+      });
+    });
+
+    it('does not let a late completion overwrite a reclaimed operation', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const operationId = 'op-reclaimed-completion-race';
+      await model.recordStart({ operationId });
+      await serverDB
+        .update(agentOperations)
+        .set({ updatedAt: new Date('2026-01-01T00:00:00.000Z') })
+        .where(eq(agentOperations.id, operationId));
+
+      expect(await model.settleStaleRunning(operationId, new Date(Date.now() - 60_000))).toBe(true);
+      expect(
+        await model.recordCompletion(operationId, {
+          completionReason: 'done',
+          status: 'done',
+        }),
+      ).toBe(false);
+      expect(await model.findById(operationId)).toMatchObject({
+        completionReason: 'lease_expired',
+        status: 'abandoned',
+      });
+    });
+  });
+
+  describe('sumChildUsage', () => {
+    const seedChild = async (
+      model: AgentOperationModel,
+      id: string,
+      parentOperationId: string,
+      usage: { llmCalls: number; toolCalls: number; totalCost: number; totalTokens: number },
+    ) => {
+      await model.recordStart({ operationId: id, parentOperationId });
+      await model.recordCompletion(id, {
+        completionReason: 'done',
+        llmCalls: usage.llmCalls,
+        status: 'done',
+        toolCalls: usage.toolCalls,
+        totalCost: usage.totalCost,
+        totalInputTokens: usage.totalTokens,
+        totalOutputTokens: 0,
+        totalTokens: usage.totalTokens,
+      });
+    };
+
+    it('sums every child of the parent', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      await model.recordStart({ operationId: 'parent' });
+      await seedChild(model, 'child-a', 'parent', {
+        llmCalls: 2,
+        toolCalls: 3,
+        totalCost: 0.25,
+        totalTokens: 1000,
+      });
+      await seedChild(model, 'child-b', 'parent', {
+        llmCalls: 1,
+        toolCalls: 4,
+        totalCost: 0.75,
+        totalTokens: 2000,
+      });
+
+      const rollup = await model.sumChildUsage('parent');
+
+      expect(rollup).toEqual({
+        llmCalls: 3,
+        toolCalls: 7,
+        totalCost: 1,
+        totalInputTokens: 3000,
+        totalOutputTokens: 0,
+        totalTokens: 3000,
+      });
+    });
+
+    // The whole reason this is a read-time SUM: the sub-agent completion bridge is
+    // contractually re-deliverable, so an accumulation onto the parent row would
+    // double-count. Re-deriving is exact however many times it runs.
+    it('is idempotent — re-deriving does not accumulate', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      await model.recordStart({ operationId: 'parent' });
+      await seedChild(model, 'child-a', 'parent', {
+        llmCalls: 1,
+        toolCalls: 1,
+        totalCost: 0.5,
+        totalTokens: 1234,
+      });
+
+      const first = await model.sumChildUsage('parent');
+      const second = await model.sumChildUsage('parent');
+
+      expect(second).toEqual(first);
+      expect(second.totalTokens).toBe(1234);
+    });
+
+    it('returns zeroes for an operation with no children', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      await model.recordStart({ operationId: 'lonely' });
+
+      expect(await model.sumChildUsage('lonely')).toEqual({
+        llmCalls: 0,
+        toolCalls: 0,
+        totalCost: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+      });
+    });
+
+    it("does not sum another user's children", async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      const attacker = new AgentOperationModel(serverDB, otherUserId);
+      await model.recordStart({ operationId: 'parent' });
+      await seedChild(model, 'child-a', 'parent', {
+        llmCalls: 1,
+        toolCalls: 1,
+        totalCost: 0.5,
+        totalTokens: 1000,
+      });
+
+      expect(await attacker.sumChildUsage('parent')).toEqual({
+        llmCalls: 0,
+        toolCalls: 0,
+        totalCost: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+      });
+    });
+  });
+
   describe('getMaxDurationSeconds', () => {
     it('returns the longest wall-clock duration, ignoring in-flight and other users', async () => {
       const model = new AgentOperationModel(serverDB, userId);
@@ -266,6 +534,33 @@ describe('AgentOperationModel', () => {
 
       const result = await model.getMaxDurationSeconds();
       expect(result).toBe(0);
+    });
+  });
+
+  describe('listOperationTree', () => {
+    it('returns the root op together with its direct children, owner-scoped', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+
+      await serverDB.insert(agentOperations).values([
+        { id: 'root', status: 'done', userId },
+        { id: 'child-a', parentOperationId: 'root', status: 'done', userId },
+        { id: 'child-b', parentOperationId: 'root', status: 'done', userId },
+        // Unrelated op (different parent) must not leak in.
+        { id: 'stranger', parentOperationId: 'other-root', status: 'done', userId },
+        // Another user's child of the same root must not leak in.
+        { id: 'foreign-child', parentOperationId: 'root', status: 'done', userId: otherUserId },
+      ]);
+
+      const tree = await model.listOperationTree('root');
+      expect(tree.map((op) => op.id).sort()).toEqual(['child-a', 'child-b', 'root']);
+    });
+
+    it('returns just the root when it has no children', async () => {
+      const model = new AgentOperationModel(serverDB, userId);
+      await serverDB.insert(agentOperations).values({ id: 'lonely', status: 'done', userId });
+
+      const tree = await model.listOperationTree('lonely');
+      expect(tree.map((op) => op.id)).toEqual(['lonely']);
     });
   });
 });

@@ -1,12 +1,15 @@
+lockfile: false
 packages:
   - packages/**
   - .
   - e2e
   - apps/desktop/src/main
   - apps/server
+  - apps/share
+  - apps/workbench
 
 minimumReleaseAgeExclude:
-  - '@lobehub/ui@5.19.0'
+  - '@lobehub/ui@5.20.2'
 
 onlyBuiltDependencies:
   - '@google/genai'

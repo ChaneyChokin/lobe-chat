@@ -15,6 +15,10 @@ export const config = {
     // /oauth stay matched below — their middleware pass is still load-bearing.)
     // include the /
     '/',
+    '/acceptance',
+    '/acceptance(.*)',
+    '/apps',
+    '/apps(.*)',
     '/community',
     '/community(.*)',
     '/labs',

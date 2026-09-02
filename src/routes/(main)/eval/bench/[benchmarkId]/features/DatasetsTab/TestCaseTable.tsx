@@ -1,4 +1,5 @@
-import { ActionIcon, Button, DropdownMenu, Flexbox, Input, Text } from '@lobehub/ui';
+import { DropdownMenu, Flexbox, Input } from '@lobehub/ui';
+import { ActionIcon, Button, Text } from '@lobehub/ui/base-ui';
 import { Pagination, Table } from 'antd';
 import { type ColumnsType } from 'antd/es/table';
 import { createStaticStyles, cssVar } from 'antd-style';

@@ -5,7 +5,8 @@ import {
   AGENT_CHAT_TOPIC_URL,
   DESKTOP_HEADER_ICON_SMALL_SIZE,
 } from '@lobechat/const';
-import { ActionIcon, Flexbox } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
+import { ActionIcon } from '@lobehub/ui/base-ui';
 import { ArrowLeft, X } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 import { memo } from 'react';
@@ -33,9 +34,9 @@ const Header = memo<{ rightExtra?: ReactNode; title: ReactNode }>(({ title, righ
   return (
     <NavHeader
       showTogglePanelButton={false}
-      style={{ paddingBlock: 8, paddingInline: 8 }}
+      style={{ paddingBlock: 8, paddingInline: 8, width: '100%' }}
       left={
-        <Flexbox horizontal align="center" gap={4}>
+        <Flexbox horizontal align="center" flex={1} gap={4} style={{ minWidth: 0 }}>
           {canGoBack && (
             <ActionIcon icon={ArrowLeft} size={DESKTOP_HEADER_ICON_SMALL_SIZE} onClick={goBack} />
           )}
@@ -61,7 +62,12 @@ const Header = memo<{ rightExtra?: ReactNode; title: ReactNode }>(({ title, righ
       }
       styles={{
         left: {
+          flex: 1,
           marginLeft: canGoBack ? 0 : 6,
+          minWidth: 0,
+        },
+        right: {
+          flex: 'none',
         },
       }}
     />

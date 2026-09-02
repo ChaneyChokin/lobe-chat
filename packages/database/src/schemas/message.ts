@@ -108,8 +108,8 @@ export const messages = pgTable(
     metadata: jsonb('metadata'),
     /**
      * Token usage + cost for this message, promoted out of `metadata.usage`
-     * into a dedicated column. `metadata.usage` stays the source of truth during
-     * the dual-write transition; new reads/aggregations should target this column.
+     * into a dedicated column. New writes target this column exclusively;
+     * readers may temporarily fall back to `metadata.usage` for legacy rows.
      */
     usage: jsonb('usage').$type<ModelUsage>(),
 
@@ -173,6 +173,8 @@ export const messages = pgTable(
     index('messages_workspace_id_idx').on(table.workspaceId),
   ],
 );
+
+export type MessageItem = typeof messages.$inferSelect;
 
 // if the message container a plugin
 export const messagePlugins = pgTable(
